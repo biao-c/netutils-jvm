@@ -1,6 +1,9 @@
 import HttpUtils.Companion.MIME_TYPE_JSON
 import com.google.gson.Gson
 import com.google.gson.annotations.SerializedName
+import kotlinx.coroutines.*
+import kotlinx.coroutines.channels.Channel
+import kotlinx.coroutines.channels.consumeEach
 import okhttp3.HttpUrl
 import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.Request
@@ -9,9 +12,9 @@ import okio.buffer
 import okio.sink
 import picocli.CommandLine.*
 import java.io.File
+import java.math.BigInteger
 import java.util.*
 import kotlin.experimental.xor
-import kotlin.math.min
 
 @Command(name = "onedrive")
 class OneDrive : Microsoft() {
@@ -230,66 +233,81 @@ class OneDrive : Microsoft() {
     @Command(name = "hash")
     fun quickXorHash(
         @Parameters(index = "0")
-        src: String
-    ) = ContentProvider.create(src).use {
-        val bitsInLastCell = 32
-        val shift = 11
-        val widthInBits = 160
-        val data = LongArray((widthInBits - 1) / 64 + 1)
-        var shiftSoFar = 0
-        var lengthSoFar = 0L
-        val array = ByteArray(4096)
-        while (lengthSoFar < it.size) {
-            val remain = it.size - lengthSoFar
-            val length = if (remain < array.size) remain.toInt() else array.size
-            var arrayIndex = 0
-            while (arrayIndex < length) {
-                val bytesRead = it.bytes.read(array, arrayIndex, length - arrayIndex)
-                arrayIndex += bytesRead
-            }
-            var vectorArrayIndex = shiftSoFar / 64
-            var vectorOffset = shiftSoFar % 64
-            val iterations = min(length, widthInBits)
-            for (i in 0 until iterations) {
-                val isLastCell = vectorArrayIndex == (data.size - 1)
-                val bitsInVectorCell = if (isLastCell) bitsInLastCell else 64
-                if (vectorOffset <= bitsInVectorCell - 8) {
-                    for (j in i until length step widthInBits) {
-                        data[vectorArrayIndex] = data[vectorArrayIndex] xor (array[j].toULong() shl vectorOffset)
+        src: String,
+        @Option(names = ["-t", "--threads"], defaultValue = "4")
+        threads: Int,
+        @Option(names = ["-s", "--split"], defaultValue = "262144")
+        split: Int
+    ) = runBlocking {
+        val slices = (1..threads + 1).map { Slice(ByteArray(split)) }
+        val channel: Channel<Slice> = Channel(Channel.RENDEZVOUS)
+        val deferreds: List<Deferred<IntArray>> = (1..threads).map {
+            async(Dispatchers.IO) {
+                val array = IntArray(160)
+                channel.consumeEach {
+                    for (i in 0 until it.length) {
+                        val index = ((i + it.offset) % 160).toInt()
+                        array[index] = array[index] xor it.bytes[i].toInt()
                     }
-                } else {
-                    val index1 = vectorArrayIndex
-                    val index2 = if (isLastCell) 0 else vectorArrayIndex + 1
-                    val low = bitsInVectorCell - vectorOffset
-                    var xoredByte: Byte = 0
-                    for (j in i until length step widthInBits) {
-                        xoredByte = xoredByte xor array[j]
-                    }
-                    data[index1] = data[index1] xor (xoredByte.toULong() shl vectorOffset)
-                    data[index2] = data[index2] xor (xoredByte.toULong() shr low)
+                    it.isValid = false
                 }
-                vectorOffset += shift
-                while (vectorOffset >= bitsInVectorCell) {
-                    vectorArrayIndex = if (isLastCell) 0 else vectorArrayIndex + 1
-                    vectorOffset -= bitsInVectorCell
+                array
+            }
+        }
+        ContentProvider.create(src).use {
+            val startTime = System.currentTimeMillis()
+            var offset = 0L
+            var slice: Slice
+            while (true) {
+                slice = slices.first { !it.isValid }
+                slice.length = it.bytes.read(slice.bytes)
+                if (slice.length == -1) break
+                slice.offset = offset
+                slice.isValid = true
+                offset += slice.length
+                channel.send(slice)
+            }
+            channel.close()
+            val intArray = IntArray(160)
+            for (array in deferreds.awaitAll()) {
+                for ((index, int) in array.withIndex()) {
+                    intArray[index] = intArray[index] xor int
                 }
             }
-            shiftSoFar = (shiftSoFar + shift * (length % widthInBits)) % widthInBits
-            lengthSoFar += length
+            var unwrapBits = BigInteger("0")
+            for ((index, int) in intArray.withIndex()) {
+                val bits = BigInteger(byteArrayOf(0, int.toByte()))
+                unwrapBits = unwrapBits xor (bits shl index * 11)
+            }
+            var wrapBits = BigInteger("0")
+            for (i in 0..10) {
+                wrapBits = wrapBits xor (unwrapBits shr 160 * i)
+            }
+            val data = ByteArray(20)
+            val array = wrapBits.toByteArray()
+            for (i in 0 until 20) {
+                data[i] = array[array.size - i - 1]
+            }
+            val lengthBytes = offset.toByteArray()
+            for ((index, byte) in lengthBytes.withIndex()) {
+                val i = 20 - lengthBytes.size + index
+                data[i] = data[i] xor byte
+            }
+            val hash = Base64.getEncoder().encodeToString(data)
+            val duration = System.currentTimeMillis() - startTime
+            println("$hash\t${it.name}\t[$duration ms]")
         }
-        val rgb = ByteArray((widthInBits - 1) / 8 + 1)
-        for (i in 0 until data.size - 1) {
-            data[i].toByteArray().copyInto(rgb, i * 8, 0, 8)
-        }
-        data.last().toByteArray().copyInto(rgb, data.lastIndex * 8, 0, rgb.size - data.lastIndex * 8)
-        val lengthBytes = lengthSoFar.toByteArray()
-        for (i in lengthBytes.indices) {
-            val position = widthInBits / 8 - lengthBytes.size + i
-            rgb[position] = rgb[position] xor lengthBytes[i]
-        }
-        val hash = Base64.getEncoder().encodeToString(rgb)
-        println("$hash\t${it.name}")
     }
+
+    class Slice(
+        val bytes: ByteArray,
+        @Volatile
+        var length: Int = 0,
+        @Volatile
+        var offset: Long = 0L,
+        @Volatile
+        var isValid: Boolean = false
+    )
 
     class Diagnostic(
         @SerializedName("ServerInfo")
