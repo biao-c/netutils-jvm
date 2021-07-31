@@ -12,7 +12,10 @@ import okio.buffer
 import okio.sink
 import picocli.CommandLine.*
 import java.io.File
+import java.io.InputStream
 import java.math.BigInteger
+import java.security.DigestInputStream
+import java.security.MessageDigest
 import java.util.*
 import kotlin.experimental.xor
 
@@ -231,17 +234,50 @@ class OneDrive : Microsoft() {
     }
 
     @Command(name = "hash")
-    fun quickXorHash(
+    fun hash(
         @Parameters(index = "0")
         src: String,
-        @Option(names = ["-t", "--threads"], defaultValue = "4")
-        threads: Int,
-        @Option(names = ["-s", "--split"], defaultValue = "262144")
-        split: Int
+        @Option(
+            names = ["-a", "--algorithm"],
+            defaultValue = "",
+            description = ["MD5 SHA-1 SHA-256"]
+        )
+        algorithm: String,
+        @Option(
+            names = ["-c", "--concurrent"],
+            defaultValue = "4"
+        )
+        concurrent: Int,
+        @Option(
+            names = ["-b", "--buffer-size"],
+            defaultValue = "262144"
+        )
+        bufferSize: Int
     ) = runBlocking {
-        val slices = (1..threads + 1).map { Slice(ByteArray(split)) }
+        ContentProvider.create(src).use {
+            if (algorithm.isBlank()) {
+                quickXorHash(it.bytes, concurrent, bufferSize)
+            } else {
+                val md = MessageDigest.getInstance(algorithm)
+                val dis = DigestInputStream(it.bytes, md)
+                val buffer = ByteArray(4096)
+                while (true) {
+                    if (dis.read(buffer) == -1) break
+                }
+                val bytes = dis.messageDigest.digest()
+                String.format("%032x", BigInteger(1, bytes))
+            }.print()
+        }
+    }
+
+    private suspend fun quickXorHash(
+        input: InputStream,
+        concurrent: Int,
+        bufferSize: Int
+    ): String = coroutineScope {
+        val slices = (0..concurrent).map { Slice(ByteArray(bufferSize)) }
         val channel: Channel<Slice> = Channel(Channel.RENDEZVOUS)
-        val deferreds: List<Deferred<IntArray>> = (1..threads).map {
+        val deferreds: List<Deferred<IntArray>> = (1..concurrent).map {
             async(Dispatchers.IO) {
                 val array = IntArray(160)
                 channel.consumeEach {
@@ -254,49 +290,44 @@ class OneDrive : Microsoft() {
                 array
             }
         }
-        ContentProvider.create(src).use {
-            val startTime = System.currentTimeMillis()
-            var offset = 0L
-            var slice: Slice
-            while (true) {
-                slice = slices.first { !it.isValid }
-                slice.length = it.bytes.read(slice.bytes)
-                if (slice.length == -1) break
-                slice.offset = offset
-                slice.isValid = true
-                offset += slice.length
-                channel.send(slice)
-            }
-            channel.close()
-            val intArray = IntArray(160)
-            for (array in deferreds.awaitAll()) {
-                for ((index, int) in array.withIndex()) {
-                    intArray[index] = intArray[index] xor int
-                }
-            }
-            var unwrapBits = BigInteger("0")
-            for ((index, int) in intArray.withIndex()) {
-                val bits = BigInteger(byteArrayOf(0, int.toByte()))
-                unwrapBits = unwrapBits xor (bits shl index * 11)
-            }
-            var wrapBits = BigInteger("0")
-            for (i in 0..10) {
-                wrapBits = wrapBits xor (unwrapBits shr 160 * i)
-            }
-            val data = ByteArray(20)
-            val array = wrapBits.toByteArray()
-            for (i in 0 until 20) {
-                data[i] = array[array.size - i - 1]
-            }
-            val lengthBytes = offset.toByteArray()
-            for ((index, byte) in lengthBytes.withIndex()) {
-                val i = 20 - lengthBytes.size + index
-                data[i] = data[i] xor byte
-            }
-            val hash = Base64.getEncoder().encodeToString(data)
-            val duration = System.currentTimeMillis() - startTime
-            println("$hash\t${it.name}\t[$duration ms]")
+        var slice: Slice
+        var length = 0L
+        while (true) {
+            slice = slices.first { !it.isValid }
+            slice.length = input.read(slice.bytes)
+            if (slice.length == -1) break
+            slice.offset = length
+            slice.isValid = true
+            length += slice.length
+            channel.send(slice)
         }
+        channel.close()
+        val intArray = IntArray(160)
+        for (array in deferreds.awaitAll()) {
+            for ((index, int) in array.withIndex()) {
+                intArray[index] = intArray[index] xor int
+            }
+        }
+        var unwrapBits = BigInteger("0")
+        for ((index, int) in intArray.withIndex()) {
+            val bits = BigInteger(byteArrayOf(0, int.toByte()))
+            unwrapBits = unwrapBits xor (bits shl index * 11)
+        }
+        var wrapBits = BigInteger("0")
+        for (i in 0..10) {
+            wrapBits = wrapBits xor (unwrapBits shr 160 * i)
+        }
+        val data = ByteArray(20)
+        val array = wrapBits.toByteArray()
+        for (i in 0 until 20) {
+            data[i] = array[array.lastIndex - i]
+        }
+        val lengthBytes = length.toByteArray()
+        for ((index, byte) in lengthBytes.withIndex()) {
+            val i = 20 - lengthBytes.size + index
+            data[i] = data[i] xor byte
+        }
+        Base64.getEncoder().encodeToString(data)
     }
 
     class Slice(

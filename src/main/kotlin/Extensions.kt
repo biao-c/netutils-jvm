@@ -7,3 +7,5 @@ fun Long.toByteArray(): ByteArray = ByteBuffer.allocate(Long.SIZE_BYTES)
     .array()
 
 fun String.find(pattern: String) = pattern.toRegex().find(this)?.run { groupValues[1] }
+
+fun String.print() = println(this)
