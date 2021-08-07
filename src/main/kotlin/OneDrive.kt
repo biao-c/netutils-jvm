@@ -242,21 +242,11 @@ class OneDrive : Microsoft() {
             defaultValue = "",
             description = ["MD5 SHA-1 SHA-256"]
         )
-        algorithm: String,
-        @Option(
-            names = ["-c", "--concurrent"],
-            defaultValue = "4"
-        )
-        concurrent: Int,
-        @Option(
-            names = ["-b", "--buffer-size"],
-            defaultValue = "262144"
-        )
-        bufferSize: Int
+        algorithm: String
     ) = runBlocking {
         ContentProvider.create(src).use {
             if (algorithm.isBlank()) {
-                quickXorHash(it.bytes, concurrent, bufferSize)
+                quickXorHash(it.bytes, 256 * 1024)
             } else {
                 val md = MessageDigest.getInstance(algorithm)
                 val dis = DigestInputStream(it.bytes, md)
@@ -271,30 +261,30 @@ class OneDrive : Microsoft() {
     }
 
     private suspend fun quickXorHash(
-        input: InputStream,
-        concurrent: Int,
+        stream: InputStream,
         bufferSize: Int
     ): String = coroutineScope {
-        val slices = (0..concurrent).map { Slice(ByteArray(bufferSize)) }
-        val channel: Channel<Slice> = Channel(Channel.RENDEZVOUS)
-        val deferreds: List<Deferred<IntArray>> = (1..concurrent).map {
-            async(Dispatchers.IO) {
+        val channel = Channel<Slice>(Channel.RENDEZVOUS)
+        val cores = Runtime.getRuntime().availableProcessors()
+        val arrays = (1..cores).map {
+            async(Dispatchers.Default) {
                 val array = IntArray(160)
                 channel.consumeEach {
                     for (i in 0 until it.length) {
-                        val index = ((i + it.offset) % 160).toInt()
-                        array[index] = array[index] xor it.bytes[i].toInt()
+                        val n = ((i + it.offset) % 160).toInt()
+                        array[n] = array[n] xor it.bytes[i].toInt()
                     }
                     it.isValid = false
                 }
                 array
             }
         }
-        var slice: Slice
         var length = 0L
+        val slices = (0..cores).map { Slice(bufferSize) }
+        var slice: Slice
         while (true) {
             slice = slices.first { !it.isValid }
-            slice.length = input.read(slice.bytes)
+            slice.length = stream.read(slice.bytes)
             if (slice.length == -1) break
             slice.offset = length
             slice.isValid = true
@@ -303,42 +293,45 @@ class OneDrive : Microsoft() {
         }
         channel.close()
         val intArray = IntArray(160)
-        for (array in deferreds.awaitAll()) {
-            for ((index, int) in array.withIndex()) {
-                intArray[index] = intArray[index] xor int
+        for (array in arrays.awaitAll()) {
+            for ((i, int) in array.withIndex()) {
+                intArray[i] = intArray[i] xor int
             }
         }
         var unwrapBits = BigInteger("0")
-        for ((index, int) in intArray.withIndex()) {
+        for ((i, int) in intArray.withIndex()) {
             val bits = BigInteger(byteArrayOf(0, int.toByte()))
-            unwrapBits = unwrapBits xor (bits shl index * 11)
+            unwrapBits = unwrapBits xor (bits shl i * 11)
         }
         var wrapBits = BigInteger("0")
         for (i in 0..10) {
             wrapBits = wrapBits xor (unwrapBits shr 160 * i)
         }
-        val data = ByteArray(20)
         val array = wrapBits.toByteArray()
+        val data = ByteArray(20)
         for (i in 0 until 20) {
             data[i] = array[array.lastIndex - i]
         }
         val lengthBytes = length.toByteArray()
-        for ((index, byte) in lengthBytes.withIndex()) {
-            val i = 20 - lengthBytes.size + index
-            data[i] = data[i] xor byte
+        for ((i, byte) in lengthBytes.withIndex()) {
+            val n = 20 - lengthBytes.size + i
+            data[n] = data[n] xor byte
         }
         Base64.getEncoder().encodeToString(data)
     }
 
-    class Slice(
-        val bytes: ByteArray,
+    class Slice(size: Int) {
         @Volatile
-        var length: Int = 0,
+        var length: Int = 0
+
         @Volatile
-        var offset: Long = 0L,
+        var offset: Long = 0L
+
         @Volatile
         var isValid: Boolean = false
-    )
+
+        val bytes = ByteArray(size)
+    }
 
     class Diagnostic(
         @SerializedName("ServerInfo")
