@@ -5,7 +5,7 @@ import kotlin.system.exitProcess
 @Command(
     name = "NetUtils",
     mixinStandardHelpOptions = true,
-    version = ["1.0"],
+    version = ["1.1"],
     subcommands = [
         YouTube::class,
         GoogleDrive::class,
@@ -16,6 +16,4 @@ import kotlin.system.exitProcess
 )
 class NetUtils
 
-fun main(args: Array<String>): Unit = exitProcess(
-    CommandLine(NetUtils()).execute(*args)
-)
+fun main(args: Array<String>): Unit = exitProcess(CommandLine(NetUtils()).execute(*args))

@@ -40,7 +40,7 @@ class CloudLucky {
             require(it.code == 200)
             it.body!!.string()
         }.run {
-            println(this)
+            print()
             Gson().fromJson(this, Credential::class.java)
         }
         val response = HttpUtils.chunkedUpload(

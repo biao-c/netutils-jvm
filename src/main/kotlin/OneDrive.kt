@@ -37,7 +37,7 @@ class OneDrive : Microsoft() {
         return httpClient.newCall(request).execute().use {
             it.header("x-ms-ags-diagnostic")
         }!!.run {
-            println(this)
+            print()
             Gson().fromJson(this, Diagnostic::class.java).serverInfo
         }
     }
@@ -62,7 +62,7 @@ class OneDrive : Microsoft() {
         return httpClient.newCall(request).execute().use {
             it.body!!.string()
         }.run {
-            println(this)
+            print()
             Gson().fromJson(this, Drive::class.java)
         }
     }
@@ -87,7 +87,7 @@ class OneDrive : Microsoft() {
         return httpClient.newCall(request).execute().use {
             it.body!!.string()
         }.run {
-            println(this)
+            print()
             Gson().fromJson(this, DriveItem::class.java)
         }
     }
@@ -153,7 +153,13 @@ class OneDrive : Microsoft() {
         name: String,
         provider: ContentProvider
     ) {
-        val url = "https://graph.microsoft.com/v1.0/me/drive/root:$dir$name:/content"
+        val url = HttpUrl.Builder()
+            .scheme("https")
+            .host("graph.microsoft.com")
+            .addPathSegments("v1.0/me/drive")
+            .addPathSegments("root:$dir$name:")
+            .addPathSegments("content")
+            .toString()
         HttpUtils.upload(
             url = url,
             method = "PUT",

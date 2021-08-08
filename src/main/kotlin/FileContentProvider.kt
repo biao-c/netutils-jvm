@@ -1,19 +1,13 @@
 import java.io.File
 import java.io.InputStream
 
-class FileContentProvider(private val file: File) : ContentProvider {
+class FileContentProvider(file: File) : ContentProvider {
 
     override val name: String = file.name
 
     override val size: Long = file.length()
 
-    override val bytes: InputStream
+    override val bytes: InputStream = file.inputStream()
 
-    init {
-        bytes = file.inputStream()
-    }
-
-    override fun close() {
-        bytes.close()
-    }
+    override fun close() = bytes.close()
 }

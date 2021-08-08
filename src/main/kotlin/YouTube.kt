@@ -22,7 +22,10 @@ class YouTube : Google() {
         // and may contain all valid UTF-8 characters except < and >.
         @Option(names = ["--title"])
         title: String? = null,
-        @Option(names = ["--privacy"], description = ["private, public, unlisted"])
+        @Option(
+            names = ["--privacy"],
+            description = ["private, public, unlisted"]
+        )
         privacy: String? = null
     ) {
         val isPrivacyValid = privacy.equals("private", true)
